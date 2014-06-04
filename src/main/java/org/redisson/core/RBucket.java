@@ -17,23 +17,20 @@ package org.redisson.core;
 
 import io.netty.util.concurrent.Future;
 
-import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 
-/**
- * Distributed and concurrent implementation of {@link java.util.concurrent.ConcurrentMap}
- * and {@link java.util.Map}
- *
- * @author Nikita Koksharov
- *
- * @param <K> key
- * @param <V> value
- */
-public interface RMap<K, V> extends ConcurrentMap<K, V>, RExpirable {
+public interface RBucket<V> extends RExpirable {
 
-    Future<V> getAsync(K key);
+    V get();
 
-    Future<V> putAsync(K key, V value);
+    Future<V> getAsync();
 
-    Future<V> removeAsync(K key);
+    void set(V value);
+
+    Future<Void> setAsync(V value);
+
+    void set(V value, long timeToLive, TimeUnit timeUnit);
+
+    Future<Void> setAsync(V value, long timeToLive, TimeUnit timeUnit);
 
 }

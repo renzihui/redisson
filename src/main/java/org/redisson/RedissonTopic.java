@@ -49,13 +49,11 @@ public class RedissonTopic<M> extends RedissonObject implements RTopic<M> {
 
     private final Map<Integer, RedisPubSubTopicListenerWrapper<String, M>> listeners =
                                 new ConcurrentHashMap<Integer, RedisPubSubTopicListenerWrapper<String, M>>();
-    private final ConnectionManager connectionManager;
 
     private PubSubConnectionEntry pubSubEntry;
 
     RedissonTopic(ConnectionManager connectionManager, String name) {
-        super(name);
-        this.connectionManager = connectionManager;
+        super(connectionManager, name);
     }
 
     private void lazySubscribe() {
@@ -63,7 +61,7 @@ public class RedissonTopic<M> extends RedissonObject implements RTopic<M> {
             return;
         }
 
-        final Promise<Boolean> newPromise = connectionManager.getGroup().next().<Boolean>newPromise();
+        final Promise<Boolean> newPromise = newPromise();
         if (!promise.compareAndSet(null, newPromise)) {
             return;
         }
@@ -71,9 +69,11 @@ public class RedissonTopic<M> extends RedissonObject implements RTopic<M> {
         RedisPubSubAdapter<String, M> listener = new RedisPubSubAdapter<String, M>() {
             @Override
             public void subscribed(String channel, long count) {
-                if (channel.equals(getName())) {
+                Promise<Boolean> subscribePromise = promise.get();
+                //in case of reconnecting, promise might already be completed.
+                if (channel.equals(getName()) && !subscribePromise.isDone()) {
                     log.debug("subscribed to '{}' channel", getName());
-                    newPromise.setSuccess(true);
+                    subscribePromise.setSuccess(true);
                 }
             }
         };
@@ -95,7 +95,7 @@ public class RedissonTopic<M> extends RedissonObject implements RTopic<M> {
     @Override
     public Future<Long> publishAsync(M message) {
         RedisConnection<String, Object> conn = connectionManager.connectionWriteOp();
-        return conn.getAsync().publish(getName(), message).addListener(connectionManager.createListener(conn));
+        return conn.getAsync().publish(getName(), message).addListener(connectionManager.createReleaseListener(conn));
     }
 
     @Override
@@ -148,6 +148,11 @@ public class RedissonTopic<M> extends RedissonObject implements RTopic<M> {
                 }
             }
         });
+    }
+
+    @Override
+    public void delete() {
+        // nothing to delete
     }
 
 }

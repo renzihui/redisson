@@ -15,14 +15,20 @@
  */
 package org.redisson;
 
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.FutureListener;
+import io.netty.util.concurrent.Promise;
+
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import org.redisson.connection.ConnectionManager;
 import org.redisson.core.RMap;
 
+import com.lambdaworks.redis.RedisAsyncConnection;
 import com.lambdaworks.redis.RedisConnection;
 
 /**
@@ -90,9 +96,15 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
     public V put(K key, V value) {
         RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
         try {
-            V prev = (V) connection.hget(getName(), key);
-            connection.hset(getName(), key, value);
-            return prev;
+            while (true) {
+                connection.watch(getName());
+                V prev = (V) connection.hget(getName(), key);
+                connection.multi();
+                connection.hset(getName(), key, value);
+                if (connection.exec().size() == 1) {
+                    return prev;
+                }
+            }
         } finally {
             connectionManager.release(connection);
         }
@@ -102,9 +114,15 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
     public V remove(Object key) {
         RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
         try {
-            V prev = (V) connection.hget(getName(), key);
-            connection.hdel(getName(), key);
-            return prev;
+            while (true) {
+                connection.watch(getName());
+                V prev = (V) connection.hget(getName(), key);
+                connection.multi();
+                connection.hdel(getName(), key);
+                if (connection.exec().size() == 1) {
+                    return prev;
+                }
+            }
         } finally {
             connectionManager.release(connection);
         }
@@ -258,6 +276,184 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
         } finally {
             connectionManager.release(connection);
         }
+    }
+
+    @Override
+    public Future<V> getAsync(K key) {
+        RedisConnection<Object, V> connection = connectionManager.connectionReadOp();
+        return connection.getAsync().hget(getName(), key).addListener(connectionManager.createReleaseListener(connection));
+    }
+
+    @Override
+    public Future<V> putAsync(K key, V value) {
+        RedisConnection<Object, V> connection = connectionManager.connectionWriteOp();
+        Promise<V> promise = connectionManager.getGroup().next().newPromise();
+        RedisAsyncConnection<Object, V> async = connection.getAsync();
+        putAsync(key, value, promise, async);
+        promise.addListener(connectionManager.createReleaseListener(connection));
+        return promise;
+    }
+
+    private void putAsync(final K key, final V value, final Promise<V> promise,
+            final RedisAsyncConnection<Object, V> async) {
+        async.watch(getName()).addListener(new FutureListener<String>() {
+            @Override
+            public void operationComplete(Future<String> future) throws Exception {
+                if (!future.isSuccess()) {
+                    promise.setFailure(future.cause());
+                    return;
+                }
+
+                if (promise.isCancelled()) {
+                    return;
+                }
+                async.hget(getName(), key).addListener(new FutureListener<V>() {
+                    @Override
+                    public void operationComplete(Future<V> future) throws Exception {
+                        if (!future.isSuccess()) {
+                            promise.setFailure(future.cause());
+                            return;
+                        }
+                        if (promise.isCancelled()) {
+                            return;
+                        }
+
+                        final V prev = future.get();
+                        async.multi().addListener(new FutureListener<String>() {
+                            @Override
+                            public void operationComplete(Future<String> future) throws Exception {
+                                if (!future.isSuccess()) {
+                                    promise.setFailure(future.cause());
+                                    return;
+                                }
+                                if (promise.isCancelled()) {
+                                    return;
+                                }
+
+                                async.hset(getName(), key, value).addListener(new FutureListener<Boolean>() {
+                                    @Override
+                                    public void operationComplete(Future<Boolean> future) throws Exception {
+                                        if (!future.isSuccess()) {
+                                            promise.setFailure(future.cause());
+                                            return;
+                                        }
+                                        if (promise.isCancelled()) {
+                                            return;
+                                        }
+
+                                        async.exec().addListener(new FutureListener<List<Object>>() {
+                                            @Override
+                                            public void operationComplete(Future<List<Object>> future) throws Exception {
+                                                if (!future.isSuccess()) {
+                                                    promise.setFailure(future.cause());
+                                                    return;
+                                                }
+                                                if (promise.isCancelled()) {
+                                                    return;
+                                                }
+
+                                                if (future.get().size() == 1) {
+                                                    promise.setSuccess(prev);
+                                                } else {
+                                                    putAsync(key, value, promise, async);
+                                                }
+                                            }
+                                        });
+
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+        });
+    }
+
+    @Override
+    public Future<V> removeAsync(K key) {
+        RedisConnection<Object, V> connection = connectionManager.connectionWriteOp();
+        Promise<V> promise = connectionManager.getGroup().next().newPromise();
+        RedisAsyncConnection<Object, V> async = connection.getAsync();
+        removeAsync(key, promise, async);
+        promise.addListener(connectionManager.createReleaseListener(connection));
+        return promise;
+    }
+
+    private void removeAsync(final K key, final Promise<V> promise,
+            final RedisAsyncConnection<Object, V> async) {
+        async.watch(getName()).addListener(new FutureListener<String>() {
+            @Override
+            public void operationComplete(Future<String> future) throws Exception {
+                if (!future.isSuccess()) {
+                    promise.setFailure(future.cause());
+                    return;
+                }
+
+                if (promise.isCancelled()) {
+                    return;
+                }
+                async.hget(getName(), key).addListener(new FutureListener<V>() {
+                    @Override
+                    public void operationComplete(Future<V> future) throws Exception {
+                        if (!future.isSuccess()) {
+                            promise.setFailure(future.cause());
+                            return;
+                        }
+                        if (promise.isCancelled()) {
+                            return;
+                        }
+
+                        final V prev = future.get();
+                        async.multi().addListener(new FutureListener<String>() {
+                            @Override
+                            public void operationComplete(Future<String> future) throws Exception {
+                                if (!future.isSuccess()) {
+                                    promise.setFailure(future.cause());
+                                    return;
+                                }
+                                if (promise.isCancelled()) {
+                                    return;
+                                }
+
+                                async.hdel(getName(), key).addListener(new FutureListener<Long>() {
+                                    @Override
+                                    public void operationComplete(Future<Long> future) throws Exception {
+                                        if (!future.isSuccess()) {
+                                            promise.setFailure(future.cause());
+                                            return;
+                                        }
+                                        if (promise.isCancelled()) {
+                                            return;
+                                        }
+
+                                        async.exec().addListener(new FutureListener<List<Object>>() {
+                                            @Override
+                                            public void operationComplete(Future<List<Object>> future) throws Exception {
+                                                if (!future.isSuccess()) {
+                                                    promise.setFailure(future.cause());
+                                                    return;
+                                                }
+                                                if (promise.isCancelled()) {
+                                                    return;
+                                                }
+
+                                                if (future.get().size() == 1) {
+                                                    promise.setSuccess(prev);
+                                                } else {
+                                                    removeAsync(key, promise, async);
+                                                }
+                                            }
+                                        });
+
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+        });
     }
 
 }
